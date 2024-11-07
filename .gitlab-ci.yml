@@ -1,0 +1,91 @@
+stages:
+  - prebuild
+  - test
+  - build
+  - deploy
+
+variables:
+    IMAGE_NAME: flask_app_cicd
+    TEST_IMAGE_NAME: flask_app_cicd_test
+    IMAGE_VERSION: ${CI_COMMIT_SHORT_SHA}
+    #gitlab artifact registry lcoation
+    IMAGE_TAG: registry.gitlab.com/${CI_PROJECT_NAMESPACE}/${CI_PROJECT_NAME}
+    #using gitlab built in variables 
+    PIPELINE_RUNNER_TAG: GCP-linux-runner1
+    SERVER_RUNNER_TAG: gcp-vm-server-toronto 
+
+
+build-test:
+    stage: prebuild
+    tags:
+      - ${PIPELINE_RUNNER_TAG} # is the tag of the self-hosted runner
+
+    before_script:
+      - docker login -u ${CI_REGISTRY_USER} -p ${CI_REGISTRY_PASSWORD} ${CI_REGISTRY}
+    script:
+      - rm .dockerignore
+      - docker build -t ${IMAGE_TAG}/${TEST_IMAGE_NAME}:${IMAGE_VERSION} -f DockerfileTest .
+      - docker push ${IMAGE_TAG}/${TEST_IMAGE_NAME}:${IMAGE_VERSION}
+
+    after_script:
+      # Recommended: Remove the image after push to artifact registry
+      - docker rmi ${IMAGE_TAG}/${TEST_IMAGE_NAME}:${IMAGE_VERSION}
+      - rm -f /home/gitlab-runner/.docker/config.json
+
+
+unit-test:
+  stage: test
+  needs:
+    - build-test
+  tags:
+      - ${PIPELINE_RUNNER_TAG}
+
+  before_script:
+      - docker login -u ${CI_REGISTRY_USER} -p ${CI_REGISTRY_PASSWORD} ${CI_REGISTRY}
+
+  script:
+    - docker pull ${IMAGE_TAG}/${TEST_IMAGE_NAME}:${IMAGE_VERSION}
+    - docker run --rm -e MONGODB_USERNAME=${MONGODB_USERNAME_GCP} -e MONGODB_PASSWORD=${MONGODB_PASSWORD_GCP} ${IMAGE_TAG}/${TEST_IMAGE_NAME}:${IMAGE_VERSION}
+
+  after_script:
+    # Recommended: Remove the image after push to artifact registry
+    - docker rmi ${IMAGE_TAG}/${TEST_IMAGE_NAME}:${IMAGE_VERSION}
+    - rm -f /home/gitlab-runner/.docker/config.json
+
+
+#for runner
+build-base:
+    stage: build
+    tags:
+      - ${PIPELINE_RUNNER_TAG} # is the tag of the self-hosted runner
+    
+    before_script:
+      - docker login -u ${CI_REGISTRY_USER} -p ${CI_REGISTRY_PASSWORD} ${CI_REGISTRY}
+    script:
+        # The following command creates the docker image
+        - docker build -t ${IMAGE_TAG}/${IMAGE_NAME}:${IMAGE_VERSION} .
+        - docker push ${IMAGE_TAG}/${IMAGE_NAME}:${IMAGE_VERSION}
+
+        #remove the image after push to artifact registry
+        - docker rmi ${IMAGE_TAG}/${IMAGE_NAME}:${IMAGE_VERSION}
+    after_script:
+      # Recommended: Remove the image after push to artifact registry
+      - docker rmi ${IMAGE_TAG}/${IMAGE_NAME}:${IMAGE_VERSION}
+      - rm -f /home/gitlab-runner/.docker/config.json
+
+deploy-base:
+    needs: [build-base]
+    stage: deploy
+    tags:
+      - ${SERVER_RUNNER_TAG} # is the tag of the self-hosted runner
+    
+    before_script:
+      - docker login -u ${CI_REGISTRY_USER} -p ${CI_REGISTRY_PASSWORD} ${CI_REGISTRY}
+    script:
+        - docker pull ${IMAGE_TAG}/${IMAGE_NAME}:${IMAGE_VERSION}
+        - docker rm -f ${IMAGE_NAME}
+        - docker run -d -p 5000:5000 --name ${IMAGE_NAME} -e MONGODB_USERNAME=${MONGODB_USERNAME_GCP} -e MONGODB_PASSWORD=${MONGODB_PASSWORD_GCP} ${IMAGE_TAG}/${IMAGE_NAME}:${IMAGE_VERSION}
+    after_script:
+      - docker rmi ${IMAGE_TAG}/${IMAGE_NAME}:${IMAGE_VERSION}
+      - rm -f /home/gitlab-runner/.docker/config.json
+
